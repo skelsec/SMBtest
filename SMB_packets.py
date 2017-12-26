@@ -2,14 +2,9 @@ import enum
 import binascii
 import datetime
 import sys
+from NTStatus import *
 from SMB_logging import LogEntry
-
-def wintime2datetime(timeint):
-	return datetime.datetime(1601,1,1) + datetime.timedelta(microseconds=(timeint/ 10.))
-
-#www.codemachine.com/downloads/win71/ntstatus.h
-class NTStatus(enum.Enum):
-	STATUS_SUCCESS = 0x00000000
+from SMB_utils import *
 
 #https://msdn.microsoft.com/en-us/library/ee441774.aspx
 class SMBHeader():
@@ -22,6 +17,7 @@ class SMBHeader():
 		self.Flags2   = None
 		self.PIDHigh  = None
 		self.SecurityFeatures = None
+		self.Signature = None
 		self.Reserved = None
 		self.TID      = None
 		self.PIDLow   = None
@@ -36,6 +32,7 @@ class SMBHeader():
 		data is expected to be bytes class
 		"""
 		self.Protocol = data[:4] #This field MUST contain the 4-byte literal string '\xFF', 'S', 'M', 'B',
+		assert self.Protocol == b'\xFFSMB', "SMBv1 Header Magic incorrect!"
 		self.Command  = SMBCommand(data[4])
 		#print(binascii.hexlify(data[5:9]))
 		self.Status   = NTStatus(int.from_bytes(data[5:8], byteorder='little'))
@@ -46,11 +43,34 @@ class SMBHeader():
 		if not self.isSigning:
 			self.SecurityFeatures = data[14:22]
 
+		else:
+			self.Signature = data[14:22]
+
 		self.Reserved = int.from_bytes(data[22:24], byteorder='little')
 		self.TID      = int.from_bytes(data[24:26], byteorder='little')
 		self.PIDLow   = int.from_bytes(data[26:28], byteorder='little')
 		self.UID      = int.from_bytes(data[28:30], byteorder='little')
 		self.MID      = int.from_bytes(data[30:32], byteorder='little')
+
+	def toBytes(self):
+		buff = b''
+		buff += self.Protocol
+		buff += self.Command.value.to_bytes(1, byteorder = 'little')
+		buff += self.Status.value.to_bytes(4, byteorder = 'little')
+		buff += self.Flags.value.to_bytes(1, byteorder = 'little')
+		buff += self.Flags2.value.to_bytes(2, byteorder = 'little')
+		buff += self.PIDHigh.to_bytes(2, byteorder = 'little')
+		if self.isSigning:
+			buff += self.SecurityFeatures
+		else:
+			buff += self.Signature
+		buff += self.Reserved.to_bytes(2, byteorder = 'little')
+		buff += self.TID.to_bytes(2, byteorder = 'little')
+		buff += self.PIDLow.to_bytes(2, byteorder = 'little')
+		buff += self.UID.to_bytes(2, byteorder = 'little')
+		buff += self.MID.to_bytes(2, byteorder = 'little')
+
+		return buff
 
 	def __repr__(self):
 		t = '===SMBHeader===\r\n'
@@ -101,6 +121,11 @@ class SMB_COM_NEGOTIATE_REPLY_PARAMS():
 		self.ServerTimeZone  = int.from_bytes(data[32:34], byteorder='little')
 		self.ChallengeLength = data[34]
 
+	def toBytes(self):
+		####TODO
+		buff = b''
+
+		return buff
 
 	def __repr__(self):
 		t = '===SMB_COM_NEGOTIATE_REPLY_PARAMS===\r\n'

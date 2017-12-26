@@ -8,6 +8,7 @@ import logging
 import traceback
 
 from SMB_packets import *
+from SMB2_packets import *
 from SMB_logging import LogEntry
 
 class SMBServer(multiprocessing.Process):
@@ -61,13 +62,15 @@ class SMBProtocolTCP(asyncio.Protocol):
 		#SMB session parameters should be stored in self._server.SMBSession object!
 		#asyncio.Protocol.__init__(self)
 		self._server = server
+		self._netbios_session_recv = False
 		self._buffer_maxsize = 10*1024
-		self._buffer_minsize = 33
+		self._buffer_minsize = 4
 		self._remaining_bytes = self._buffer_minsize
 		self._request_data_size = self._buffer_maxsize #TODO: this should be set based on the SMB flags in the _SMBHeader
 		self._transport = None
 		self._buffer = b''
 		self._SMBMessage = SMBMessage()
+		self._SMB2Message = SMB2Message()
 
 
 	def connection_made(self, transport):
@@ -91,48 +94,70 @@ class SMBProtocolTCP(asyncio.Protocol):
 	## Override this to start handling the buffer, the data is in self._buffer as a string!
 	def _parsebuff(self):
 		try:
-			if len(self._buffer) <= self._buffer_minsize:
-				self._server.log(logging.DEBUG, 'Need moar data!!!')
-				return
+			if not self._netbios_session_recv:
+				if len(self._buffer) <= self._buffer_minsize:
+					self._server.log(logging.DEBUG, 'Need moar data!!!')
+					return
 
-			if self._SMBMessage.header is None:
-				self._SMBMessage.parse_header(self._buffer[:32])
-				self._server.log(logging.DEBUG, 'SMB header parsed')
+				if len(self._buffer) > self._buffer_minsize:
+					assert self._buffer[0] == 0, "This is not SMB data"
+					self._buffer_maxsize = int.from_bytes(self._buffer[1:4],byteorder='big') + 4
+					self._netbios_session_recv = True
 
-			#BE CAREFUL DO NOT WRITE IT AS 'ELSE' because it will stop the processing of remaining data and break the comms!!!
-			if self._SMBMessage.header is not None:
-				if self._SMBMessage.command.params.WordCount is None:
-					wordcount = self._buffer[32]
-					parameter_size = wordcount*2
-					if parameter_size > len(self._buffer[33:]):
-						self._server.log(logging.DEBUG, 'Need moar data for params!!!')
-						return
+			if len(self._buffer) >= self._buffer_maxsize:
+				#check version of SMB
+				if self._buffer[4] == 0xFE:
+					self._parse_SMBv2(self._buffer[4:self._buffer_maxsize])
+					self._clean_buffer()
 
-					self._server.log(logging.DEBUG, 'SMB parsing params')
-					self._SMBMessage.command.params.parse(self._buffer[32:33+parameter_size])
-
-				if self._SMBMessage.command.params.WordCount is not None:
-					bytecountPos = 33+(2*self._SMBMessage.command.params.WordCount)
-					bytecount = int.from_bytes(self._buffer[bytecountPos:bytecountPos+1], byteorder='little')
-					if bytecount > len(self._buffer[bytecountPos:]):
-						self._server.log(logging.DEBUG, 'Need moar data for data!!!')
-						return
-
-					self._server.log(logging.DEBUG, 'SMB parsing data')
-					self._SMBMessage.command.data.parse(self._buffer[bytecountPos:])
-
-					#all parts of the message is recieved, clearing out buffer!
-					self._buffer = b''
-					#we send the self._SMBMessage to the SMBServer's handle function to deal with higher-layer 
-					self._server.handle(self._SMBMessage)
-					#re clear out the self._SMBMessage as it is not needed anymore
-					self._SMBMessage = SMBMessage()
+				elif self._buffer[4] == 0xFF:
+					self._parse_SMBv1(self._buffer[4:self._buffer_maxsize])
+					self._clean_buffer()
+				else:
+					raise Exception('Not SMB traffic!')
 
 		except Exception as e:
 			self._server.log(logging.INFO,'Exception! %s' % (str(e),))
 			traceback.print_exc()
 
+	def _clean_buffer(self):
+		self._SMBMessage = SMBMessage()
+		self._buffer = self._buffer[self._buffer_maxsize:]
+		self._netbios_session_recv = False
+		self._buffer_maxsize = 10*1024
+		self._parsebuff()
 
 
+	def _parse_SMBv2(self, buff):
+		self._SMB2Message.parse_header(buff[:64])
+		self._server.log(logging.DEBUG, 'SMB header parsed')
+		self._SMB2Message.command.parse(buff[64:])
 
+		self._server.handle(self._SMB2Message)
+		self._clean_buffer()
 
+	def _parse_SMBv1(self, buff):
+		try:
+			self._SMBMessage.parse_header(buff[:32])
+			self._server.log(logging.DEBUG, 'SMB header parsed')
+
+			wordcount = buff[32]
+			parameter_size = wordcount*2
+			self._server.log(logging.DEBUG, 'SMB parsing params')
+			self._SMBMessage.command.params.parse(buff[32:33+parameter_size])
+
+			bytecountPos = 33+(2*self._SMBMessage.command.params.WordCount)
+			bytecount = int.from_bytes(buff[bytecountPos:bytecountPos+1], byteorder='little')
+			self._server.log(logging.DEBUG, 'SMB parsing data')
+			
+			self._SMBMessage.command.data.parse(buff[bytecountPos:])
+			
+			#we send the self._SMBMessage to the SMBServer's handle function to deal with higher-layer 
+			self._server.handle(self._SMBMessage)
+		
+			self._clean_buffer()
+			
+
+		except Exception as e:
+			self._server.log(logging.INFO,'Exception! %s' % (str(e),))
+			traceback.print_exc()
